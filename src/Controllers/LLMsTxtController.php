@@ -5,7 +5,9 @@ namespace XD\LLMsTxt\Controllers;
 use Psr\SimpleCache\CacheInterface;
 use SilverStripe\CMS\Model\SiteTree;
 use SilverStripe\Control\Controller;
+use SilverStripe\Control\Director;
 use SilverStripe\Control\HTTPResponse;
+use SilverStripe\Core\Flushable;
 use SilverStripe\Core\Injector\Injector;
 use SilverStripe\i18n\i18n;
 use SilverStripe\ORM\FieldType\DBField;
@@ -22,7 +24,7 @@ use SilverStripe\SiteConfig\SiteConfig;
  * summary of the Elemental block content (getElementsForSearch()). Because that
  * fallback renders blocks (heavy), the output is cached per locale.
  */
-class LLMsTxtController extends Controller
+class LLMsTxtController extends Controller implements Flushable
 {
     private static array $allowed_actions = ['index'];
 
@@ -67,6 +69,31 @@ class LLMsTxtController extends Controller
         'SilverStripe\\CMS\\Model\\VirtualPage',
     ];
 
+    /**
+     * Page classes whose summary uses the MetaDescription only — no Content/Elemental fallback.
+     * For listing pages (e.g. product categories) whose body is filter/count UI rather than prose,
+     * so the fallback would otherwise surface noise. Matched with instanceof, so subclasses count.
+     * @config
+     */
+    private static array $metadescription_only_classes = [];
+
+    /**
+     * DataObject classes to also list in the index, as [ClassName => 'Section heading']. Use for
+     * catalogue items that live as DataObjects under a page (caravan models, occasions, rentables…).
+     * Each record needs a Title and a Link()/AbsoluteLink(); its one-line summary comes from an
+     * optional getLLMsSummary() on the record (add it via the model or an extension), else its
+     * MetaDescription. getLLMsSummary() may return false to exclude the record from the index
+     * (e.g. a sold occasion or an inactive rentable). Records failing canView() are skipped.
+     * @config
+     */
+    private static array $dataobject_classes = [];
+
+    /**
+     * Max records listed per DataObject class (0 = unlimited).
+     * @config
+     */
+    private static int $dataobject_max = 0;
+
     public function index(): HTTPResponse
     {
         $ttl = (int) $this->config()->get('cache_ttl');
@@ -98,6 +125,19 @@ class LLMsTxtController extends Controller
             return Injector::inst()->get(CacheInterface::class . '.llmsTxt');
         } catch (\Throwable $e) {
             return null;
+        }
+    }
+
+    /**
+     * Clear the shared llms.txt cache pool (index + per-page Markdown) on ?flush / dev/build.
+     * CacheFactory pools are not wiped automatically, so clear it explicitly.
+     */
+    public static function flush(): void
+    {
+        try {
+            Injector::inst()->get(CacheInterface::class . '.llmsTxt')->clear();
+        } catch (\Throwable $e) {
+            // no cache configured — nothing to clear
         }
     }
 
@@ -160,6 +200,14 @@ class LLMsTxtController extends Controller
             $lines[] = sprintf('> Showing the first %d pages.', $maxPages);
         }
 
+        foreach ($this->dataObjectSections() as $section) {
+            $lines[] = '';
+            $lines[] = '## ' . $section['heading'];
+            foreach ($section['rows'] as $row) {
+                $lines[] = $row;
+            }
+        }
+
         return implode("\n", $lines) . "\n";
     }
 
@@ -202,7 +250,10 @@ class LLMsTxtController extends Controller
     {
         $summary = trim((string) $page->MetaDescription);
 
-        if ($summary === '') {
+        // Listing pages (e.g. product categories) have no editorial Content — only filter/count
+        // UI — so the Content/Elemental fallback would surface noise. For those classes summarise
+        // from the MetaDescription alone (empty until one is set).
+        if ($summary === '' && !$this->isMetaDescriptionOnly($page)) {
             $text = trim(strip_tags((string) $page->dbObject('Content')));
             if ($text === '' && $page->hasMethod('getElementsForSearch')) {
                 try {
@@ -217,6 +268,101 @@ class LLMsTxtController extends Controller
             }
         }
 
-        return trim(preg_replace('/\s+/', ' ', $summary));
+        return $this->clean($summary);
+    }
+
+    /**
+     * True when the page's class is configured to summarise from MetaDescription only
+     * (skipping the Content/Elemental fallback). Matched with instanceof, so subclasses count.
+     */
+    private function isMetaDescriptionOnly(SiteTree $page): bool
+    {
+        foreach ((array) $this->config()->get('metadescription_only_classes') as $class) {
+            if ($class && $page instanceof $class) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Normalise a plain-text fragment for the index: decode HTML entities (the source is HTML,
+     * the output is plain UTF-8 Markdown) and collapse whitespace.
+     */
+    private function clean(string $text): string
+    {
+        $text = html_entity_decode($text, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+        return trim((string) preg_replace('/\s+/', ' ', $text));
+    }
+
+    /**
+     * Build "## Heading" sections for the configured DataObject classes (catalogue items that live
+     * as DataObjects under a page). Only classes yielding at least one viewable, linkable record are
+     * returned.
+     *
+     * @return array<int, array{heading: string, rows: array<int, string>}>
+     */
+    private function dataObjectSections(): array
+    {
+        $sections = [];
+        $max = (int) $this->config()->get('dataobject_max');
+
+        foreach ((array) $this->config()->get('dataobject_classes') as $class => $heading) {
+            if (!is_string($class) || !class_exists($class)) {
+                continue;
+            }
+            $rows = [];
+            $count = 0;
+            foreach ($class::get() as $record) {
+                if ($max > 0 && $count >= $max) {
+                    break;
+                }
+                if (!$record->canView()) {
+                    continue;
+                }
+                $title = trim((string) $record->Title);
+                $link = $this->recordLink($record);
+                if ($title === '' || $link === null) {
+                    continue;
+                }
+                // getLLMsSummary() may return false to opt the record out of the index entirely
+                // (e.g. a sold occasion or an inactive rentable); a string is used as the summary.
+                $summaryRaw = $record->hasMethod('getLLMsSummary') ? $record->getLLMsSummary() : null;
+                if ($summaryRaw === false) {
+                    continue;
+                }
+                $summary = $this->clean((string) ($summaryRaw ?? $record->MetaDescription));
+                $row = '- [' . $title . '](' . $link . ')';
+                if ($summary !== '') {
+                    $row .= ': ' . $summary;
+                }
+                $rows[] = $row;
+                $count++;
+            }
+            if ($rows !== []) {
+                $sections[] = [
+                    'heading' => (string) ($heading ?: $class),
+                    'rows' => $rows,
+                ];
+            }
+        }
+
+        return $sections;
+    }
+
+    /**
+     * Absolute URL for a record, or null when it has none.
+     */
+    private function recordLink($record): ?string
+    {
+        foreach (['AbsoluteLink', 'Link', 'getLink'] as $method) {
+            if ($record->hasMethod($method)) {
+                $url = (string) $record->$method();
+                if ($url !== '') {
+                    return Director::absoluteURL($url);
+                }
+            }
+        }
+        return null;
     }
 }

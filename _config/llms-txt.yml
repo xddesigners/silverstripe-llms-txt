@@ -11,6 +11,12 @@ SilverStripe\CMS\Controllers\ContentController:
   extensions:
     - XD\LLMsTxt\Extensions\MarkdownPageExtension
 
+# Clear the llms.txt cache on publish/unpublish so the index reflects content changes immediately
+# (the index is cached per locale and does not key on content versions).
+SilverStripe\CMS\Model\SiteTree:
+  extensions:
+    - XD\LLMsTxt\Extensions\LLMsTxtCacheFlushExtension
+
 # Cache pool shared by the index and the per-page Markdown (cleared on ?flush).
 SilverStripe\Core\Injector\Injector:
   Psr\SimpleCache\CacheInterface.llmsTxt:
@@ -25,3 +31,6 @@ SilverStripe\Core\Injector\Injector:
 #   max_pages: 300         # cap the number of pages listed (0 = unlimited)
 #   max_depth: 2           # only pages up to N levels deep (0 = unlimited, 1 = top-level)
 #   menu_only: false       # only list pages shown in menus
+#   metadescription_only_classes: []  # classes summarised from MetaDescription only (instanceof)
+#   dataobject_classes: {}            # [ClassName: 'Heading'] catalogue DataObjects to also list
+#   dataobject_max: 0                 # cap records listed per DataObject class (0 = unlimited)

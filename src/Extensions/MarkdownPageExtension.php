@@ -14,21 +14,28 @@ use SilverStripe\Core\Convert;
 use SilverStripe\Core\Extension;
 use SilverStripe\Core\Injector\Injector;
 use SilverStripe\i18n\i18n;
+use SilverStripe\ORM\DataObject;
 use SilverStripe\View\Requirements;
 use XD\LLMsTxt\Controllers\LLMsTxtController;
 
 /**
- * Serves a clean Markdown version of each page and advertises it in the page head.
+ * Serves a clean Markdown version of each page — and of a sub-record shown under a page (e.g. a
+ * catalogue item served by the page's controller) — and advertises it in the page head.
  *
  * Applied to ContentController, so on every front-end page:
- *  - if the request is for the `.md` variant (URL suffix `foo/bar.md`) OR the
- *    client sends `Accept: text/markdown`, respond with the page as Markdown
- *    (Title + MetaDescription + body, incl. Elemental blocks) instead of HTML;
- *  - otherwise inject `<link rel="alternate" type="text/markdown">` (pointing at
- *    the .md variant) and `<link rel="describedby" href="/llms.txt">` into <head>.
+ *  - if the request is for the `.md` variant (URL suffix `foo/bar.md`) OR the client sends
+ *    `Accept: text/markdown`, respond with the subject rendered as Markdown instead of HTML;
+ *  - otherwise inject `<link rel="alternate" type="text/markdown">` (the current URL + `.md`) and
+ *    `<link rel="describedby" href="/llms.txt">` into <head>.
  *
- * No static-publish/queue dependency — Markdown is built on the fly and cached
- * per page + locale, keyed on LastEdited so it invalidates itself on edit.
+ * The "subject" is normally `$controller->data()` (the page). A controller can override it for a
+ * detail view by implementing `getLLMsRecord(): ?DataObject` (e.g. resolving the occasion/model
+ * from the URL), so `<page>/<action>/<slug>.md` returns that record's Markdown. The record can be
+ * any DataObject with a Title and a Content or Description field; a getLLMsSummary() facts line and
+ * an updateLLMsMarkdown() hook are included when present.
+ *
+ * No static-publish/queue dependency — Markdown is built on the fly and cached per subject +
+ * locale, keyed on LastEdited so it invalidates itself on edit.
  *
  * @property \SilverStripe\CMS\Controllers\ContentController $owner
  */
@@ -38,17 +45,16 @@ class MarkdownPageExtension extends Extension
     {
         $owner = $this->getOwner();
         $request = $owner->getRequest();
-        $page = $owner->data();
-
-        if (!$page instanceof SiteTree || !$page->exists()) {
-            return;
-        }
 
         if ($this->markdownWanted($request)) {
-            if (!$page->canView()) {
+            $subject = $this->resolveSubject();
+            if (!$subject || !$subject->exists()) {
+                return; // nothing to render as Markdown; let the normal flow continue
+            }
+            if (!$subject->canView()) {
                 return; // let the normal flow handle permission (login/403)
             }
-            $response = HTTPResponse::create($this->pageMarkdown($page));
+            $response = HTTPResponse::create($this->subjectMarkdown($subject));
             $response->addHeader('Content-Type', 'text/markdown; charset=utf-8');
             $ttl = (int) Config::inst()->get(LLMsTxtController::class, 'cache_ttl');
             if ($ttl > 0) {
@@ -58,13 +64,34 @@ class MarkdownPageExtension extends Extension
             throw new HTTPResponse_Exception($response);
         }
 
-        // Normal HTML render: advertise the Markdown alternate + the llms.txt index.
+        // Normal HTML render: advertise the Markdown alternate (the current URL + .md) + the index.
+        $page = $owner->data();
+        if (!$page instanceof SiteTree || !$page->exists()) {
+            return;
+        }
         $tags = '<link rel="describedby" href="' . Convert::raw2att(Director::absoluteURL('llms.txt')) . '">';
-        if ($mdUrl = $this->markdownUrl($page)) {
+        if ($mdUrl = $this->markdownUrl($request)) {
             $tags = '<link rel="alternate" type="text/markdown" href="' . Convert::raw2att($mdUrl) . '">'
                 . "\n" . $tags;
         }
         Requirements::insertHeadTags($tags);
+    }
+
+    /**
+     * The record to render: a controller-supplied detail record (getLLMsRecord()) when present,
+     * otherwise the page itself.
+     */
+    private function resolveSubject(): ?DataObject
+    {
+        $owner = $this->getOwner();
+        if ($owner->hasMethod('getLLMsRecord')) {
+            $record = $owner->getLLMsRecord();
+            if ($record instanceof DataObject && $record->exists()) {
+                return $record;
+            }
+        }
+        $page = $owner->data();
+        return $page instanceof DataObject ? $page : null;
     }
 
     private function markdownWanted(HTTPRequest $request): bool
@@ -76,22 +103,23 @@ class MarkdownPageExtension extends Extension
     }
 
     /**
-     * Absolute URL of the page's .md variant, or null for the home page (which has
-     * no clean `.md` route).
+     * Absolute URL of the current request's .md variant, or null for the home page (no clean .md).
+     * Uses the request URL so detail views (…/presentation/<slug>) advertise their own .md.
      */
-    private function markdownUrl(SiteTree $page): ?string
+    private function markdownUrl(HTTPRequest $request): ?string
     {
-        $link = rtrim((string) $page->Link(), '/');
-        if ($link === '') {
+        $url = trim((string) $request->getURL(), '/');
+        if ($url === '') {
             return null;
         }
-        return Director::absoluteURL($link . '.md');
+        return Director::absoluteURL($url . '.md');
     }
 
-    private function pageMarkdown(SiteTree $page): string
+    private function subjectMarkdown(DataObject $subject): string
     {
         $cache = $this->cache();
-        $key = 'md_' . i18n::get_locale() . '_' . $page->ID . '_' . strtotime((string) $page->LastEdited);
+        $key = 'md_' . i18n::get_locale() . '_' . str_replace('\\', '-', get_class($subject))
+            . '_' . $subject->ID . '_' . strtotime((string) $subject->LastEdited);
         if ($cache) {
             $hit = $cache->get($key);
             if ($hit !== null) {
@@ -99,17 +127,37 @@ class MarkdownPageExtension extends Extension
             }
         }
 
-        $md = '# ' . $page->Title . "\n";
-        if (trim((string) $page->MetaDescription) !== '') {
-            $md .= "\n> " . trim(preg_replace('/\s+/', ' ', $page->MetaDescription)) . "\n";
+        $md = '# ' . $subject->Title . "\n";
+        if ($subject->hasField('MetaDescription') && trim((string) $subject->MetaDescription) !== '') {
+            $md .= "\n> " . trim(preg_replace('/\s+/', ' ', $subject->MetaDescription)) . "\n";
         }
 
-        $html = (string) $page->dbObject('Content');
-        if (trim(strip_tags($html)) === '' && $page->hasMethod('getElementsForSearch')) {
-            // getElementsForSearch() renders blocks and can throw for blocks that
-            // assume full page scope; never let that fatal the .md response.
+        // A record's own one-line facts (brand/price/specs). Pages/products contribute via the
+        // updateLLMsMarkdown() hook below instead, so this is skipped for them.
+        if ($subject->hasMethod('getLLMsSummary')) {
+            $summary = $subject->getLLMsSummary();
+            if (is_string($summary) && trim($summary) !== '') {
+                $md .= "\n" . trim($summary) . "\n";
+            }
+        }
+
+        // Let the subject contribute structured Markdown (e.g. a product's brand/price/SKU or a
+        // series page listing its models), after the title/summary and before the body.
+        // invokeWithExtensions() (not extend()) so a method on the class ITSELF is called too.
+        $subject->invokeWithExtensions('updateLLMsMarkdown', $md);
+
+        $html = '';
+        if ($subject->hasField('Content')) {
+            $html = (string) $subject->dbObject('Content');
+        }
+        if (trim(strip_tags($html)) === '' && $subject->hasField('Description')) {
+            $html = (string) $subject->dbObject('Description');
+        }
+        if (trim(strip_tags($html)) === '' && $subject->hasMethod('getElementsForSearch')) {
+            // getElementsForSearch() renders blocks and can throw for blocks that assume full page
+            // scope; never let that fatal the .md response.
             try {
-                $html = (string) $page->getElementsForSearch();
+                $html = (string) $subject->getElementsForSearch();
             } catch (\Throwable $e) {
                 $html = '';
             }
@@ -127,7 +175,9 @@ class MarkdownPageExtension extends Extension
             }
         }
 
-        $md = trim($md) . "\n";
+        // Decode HTML entities left over from the source HTML (e.g. &amp;, &nbsp;, &#039;) so the
+        // Markdown output is clean UTF-8 text rather than carrying entity references.
+        $md = html_entity_decode(trim($md), ENT_QUOTES | ENT_HTML5, 'UTF-8') . "\n";
 
         if ($cache) {
             $ttl = (int) Config::inst()->get(LLMsTxtController::class, 'cache_ttl');

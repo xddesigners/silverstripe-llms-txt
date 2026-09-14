@@ -1,0 +1,28 @@
+{
+    "name": "xddesigners/silverstripe-llms-txt",
+    "description": "Generates an /llms.txt index and clean per-page Markdown (.md) versions of pages for LLMs / AI agents (https://llmstxt.org). No static-publish-queue dependency.",
+    "type": "silverstripe-vendormodule",
+    "homepage": "https://github.com/xddesigners/silverstripe-llms-txt",
+    "keywords": ["silverstripe", "llms.txt", "llm", "ai", "markdown", "seo"],
+    "license": "BSD-3-Clause",
+    "authors": [
+        {
+            "name": "Remy Vaartjes",
+            "email": "remy@xd.nl",
+            "homepage": "https://github.com/rvxd"
+        }
+    ],
+    "require": {
+        "php": "^8.1",
+        "silverstripe/cms": "^6",
+        "league/html-to-markdown": "^5.1"
+    },
+    "suggest": {
+        "tractorcow/silverstripe-fluent": "Per-locale llms.txt and per-page Markdown output."
+    },
+    "autoload": {
+        "psr-4": {
+            "XD\\LLMsTxt\\": "src/"
+        }
+    }
+}

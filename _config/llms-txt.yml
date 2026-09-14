@@ -1,0 +1,27 @@
+---
+Name: xd-llms-txt
+---
+# /llms.txt index route.
+SilverStripe\Control\Director:
+  rules:
+    'llms.txt': XD\LLMsTxt\Controllers\LLMsTxtController
+
+# Per-page Markdown (.md variant + Accept: text/markdown) and the <head> link tags.
+SilverStripe\CMS\Controllers\ContentController:
+  extensions:
+    - XD\LLMsTxt\Extensions\MarkdownPageExtension
+
+# Cache pool shared by the index and the per-page Markdown (cleared on ?flush).
+SilverStripe\Core\Injector\Injector:
+  Psr\SimpleCache\CacheInterface.llmsTxt:
+    factory: SilverStripe\Core\Cache\CacheFactory
+    constructor:
+      namespace: llmsTxt
+
+# Optional tuning (defaults keep small sites unchanged):
+# XD\LLMsTxt\Controllers\LLMsTxtController:
+#   cache_ttl: 3600        # seconds to cache output (0 = off; also drives .md cache + Cache-Control)
+#   optional_section: true # split non-menu pages into a "## Optional" section
+#   max_pages: 300         # cap the number of pages listed (0 = unlimited)
+#   max_depth: 2           # only pages up to N levels deep (0 = unlimited, 1 = top-level)
+#   menu_only: false       # only list pages shown in menus

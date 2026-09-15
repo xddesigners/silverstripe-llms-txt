@@ -128,8 +128,13 @@ class MarkdownPageExtension extends Extension
         }
 
         $md = '# ' . $subject->Title . "\n";
-        if ($subject->hasField('MetaDescription') && trim((string) $subject->MetaDescription) !== '') {
-            $md .= "\n> " . trim(preg_replace('/\s+/', ' ', $subject->MetaDescription)) . "\n";
+        // Prefer the site's resolved meta description (convention) so it matches the rendered <meta>
+        // and inherits the site's fallbacks; else the raw field (records without one get nothing here).
+        $metaDescription = $subject->hasMethod('getResolvedMetaDescription')
+            ? (string) $subject->getResolvedMetaDescription()
+            : ($subject->hasField('MetaDescription') ? (string) $subject->MetaDescription : '');
+        if (trim($metaDescription) !== '') {
+            $md .= "\n> " . trim(preg_replace('/\s+/', ' ', $metaDescription)) . "\n";
         }
 
         // A record's own one-line facts (brand/price/specs). Pages/products contribute via the
@@ -144,7 +149,12 @@ class MarkdownPageExtension extends Extension
         // Let the subject contribute structured Markdown (e.g. a product's brand/price/SKU or a
         // series page listing its models), after the title/summary and before the body.
         // invokeWithExtensions() (not extend()) so a method on the class ITSELF is called too.
-        $subject->invokeWithExtensions('updateLLMsMarkdown', $md);
+        // Guarded so a buggy hook can't turn the .md into a 500 (any Markdown already appended stays).
+        try {
+            $subject->invokeWithExtensions('updateLLMsMarkdown', $md);
+        } catch (\Throwable $e) {
+            // ignore — render the .md without the hook's contribution
+        }
 
         $html = '';
         if ($subject->hasField('Content')) {

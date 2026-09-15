@@ -248,12 +248,20 @@ class LLMsTxtController extends Controller implements Flushable
      */
     private function pageSummary(SiteTree $page): string
     {
-        $summary = trim((string) $page->MetaDescription);
+        // Metadescription-only classes: use the raw field alone (no Content/Elemental fallback).
+        if ($this->isMetaDescriptionOnly($page)) {
+            return $this->clean((string) $page->MetaDescription);
+        }
 
-        // Listing pages (e.g. product categories) have no editorial Content — only filter/count
-        // UI — so the Content/Elemental fallback would surface noise. For those classes summarise
-        // from the MetaDescription alone (empty until one is set).
-        if ($summary === '' && !$this->isMetaDescriptionOnly($page)) {
+        // Prefer the site's resolved meta description when the page provides one (convention), so the
+        // summary matches the rendered <meta name="description">, including the site's own fallbacks.
+        if ($page->hasMethod('getResolvedMetaDescription')) {
+            return $this->clean((string) $page->getResolvedMetaDescription());
+        }
+
+        // Generic fallback: MetaDescription → Content field → Elemental blocks, word-limited.
+        $summary = trim((string) $page->MetaDescription);
+        if ($summary === '') {
             $text = trim(strip_tags((string) $page->dbObject('Content')));
             if ($text === '' && $page->hasMethod('getElementsForSearch')) {
                 try {

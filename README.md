@@ -75,6 +75,10 @@ Add richer output from your own page types and models:
   record currently being viewed (resolved from the request), so `…/<action>/<slug>.md`
   renders that record instead of the page. It runs at `onAfterInit`, before action
   params are set, so parse the URL rather than reading `param()`.
+- **`getResolvedMetaDescription(): string`** — on a page, return the description the site
+  actually renders (with your own fallbacks, e.g. content → homepage → site default). When
+  present it's used for the index summary and the `.md` description, so llms.txt matches your
+  `<meta name="description">`.
 
 Records rendered as `.md` use their `Content` field, else `Description`.
 

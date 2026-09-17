@@ -157,20 +157,22 @@ class MarkdownPageExtension extends Extension
         }
 
         $html = '';
-        if ($subject->hasField('Content')) {
-            $html = (string) $subject->dbObject('Content');
-        }
-        if (trim(strip_tags($html)) === '' && $subject->hasField('Description')) {
-            $html = (string) $subject->dbObject('Description');
-        }
-        if (trim(strip_tags($html)) === '' && $subject->hasMethod('getElementsForSearch')) {
-            // getElementsForSearch() renders blocks and can throw for blocks that assume full page
-            // scope; never let that fatal the .md response.
+        // Prefer Elemental block content: on block-based pages the blocks ARE the page content, while the
+        // Content field is often a vestigial default. getElementsForSearch() renders blocks and can throw for
+        // blocks that assume full page scope, so never let it fatal the .md response.
+        if ($subject->hasMethod('getElementsForSearch')) {
             try {
                 $html = (string) $subject->getElementsForSearch();
             } catch (\Throwable $e) {
                 $html = '';
             }
+        }
+        // Fall back to the Content / Description field when the record has no blocks.
+        if (trim(strip_tags($html)) === '' && $subject->hasField('Content')) {
+            $html = (string) $subject->dbObject('Content');
+        }
+        if (trim(strip_tags($html)) === '' && $subject->hasField('Description')) {
+            $html = (string) $subject->dbObject('Description');
         }
         if (trim(strip_tags($html)) !== '') {
             try {

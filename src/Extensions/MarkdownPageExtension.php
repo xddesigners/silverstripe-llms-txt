@@ -156,18 +156,10 @@ class MarkdownPageExtension extends Extension
             // ignore — render the .md without the hook's contribution
         }
 
-        $html = '';
         // Prefer Elemental block content: on block-based pages the blocks ARE the page content, while the
-        // Content field is often a vestigial default. getElementsForSearch() renders blocks and can throw for
-        // blocks that assume full page scope, so never let it fatal the .md response.
-        if ($subject->hasMethod('getElementsForSearch')) {
-            try {
-                $html = (string) $subject->getElementsForSearch();
-            } catch (\Throwable $e) {
-                $html = '';
-            }
-        }
-        // Fall back to the Content / Description field when the record has no blocks.
+        // Content field is often a vestigial default.
+        $html = $this->blocksForMarkdown($subject);
+        // Fall back to the Content / Description field when the record has no (renderable) blocks.
         if (trim(strip_tags($html)) === '' && $subject->hasField('Content')) {
             $html = (string) $subject->dbObject('Content');
         }
@@ -198,6 +190,44 @@ class MarkdownPageExtension extends Extension
             }
         }
         return $md;
+    }
+
+    /**
+     * Collect the page's Elemental block content as HTML for the Markdown body. Each block is rendered with
+     * its own guard, so a single block that assumes full page scope can't blank the whole page (which would
+     * otherwise silently fall back to the vestigial Content field). Respects each block's search-indexable
+     * flag. Returns '' for records without an Elemental area, so the caller falls back to Content/Description.
+     */
+    private function blocksForMarkdown(DataObject $subject): string
+    {
+        if (!$subject->hasMethod('getElementsForSearch')) {
+            return '';
+        }
+        try {
+            $area = $subject->ElementalArea();
+            if (!$area || !$area->exists()) {
+                return '';
+            }
+            $parts = [];
+            foreach ($area->Elements() as $element) {
+                if ($element->hasMethod('getSearchIndexable') && !$element->getSearchIndexable()) {
+                    continue;
+                }
+                try {
+                    $parts[] = trim((string) $element->getContentForSearchIndex());
+                } catch (\Throwable $e) {
+                    // Skip a block that can't render in this context rather than losing the whole page.
+                }
+            }
+            return trim(implode("\n\n", array_filter($parts)));
+        } catch (\Throwable $e) {
+            // Last resort: the aggregate method (all-or-nothing, but guarded).
+            try {
+                return (string) $subject->getElementsForSearch();
+            } catch (\Throwable $e2) {
+                return '';
+            }
+        }
     }
 
     private function cache(): ?CacheInterface
